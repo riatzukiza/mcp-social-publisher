@@ -82,6 +82,7 @@ const oauth = new SimpleOAuthProvider(
 );
 
 const app = express();
+const authFormParser = express.urlencoded({ extended: false });
 const jsonParser = express.json({ limit: "1mb" });
 
 app.set("trust proxy", true);
@@ -101,6 +102,91 @@ app.get("/health", async (_req, res) => {
     targetCount: targets.length,
     storage: usePostgres ? "postgres" : "file",
   });
+});
+
+app.all("/authorize", authFormParser, async (req, res) => {
+  if (req.method !== "GET" && req.method !== "POST") {
+    res.status(405).json({ error: "invalid_request", error_description: "Method not allowed" });
+    return;
+  }
+
+  res.setHeader("Cache-Control", "no-store");
+
+  const source = req.method === "POST" ? req.body : req.query;
+  const clientId = String(source.client_id ?? "").trim();
+  let redirectUri = typeof source.redirect_uri === "string" ? source.redirect_uri : undefined;
+
+  if (!clientId) {
+    res.status(400).json({ error: "invalid_request", error_description: "client_id is required" });
+    return;
+  }
+
+  try {
+    let client = await oauth.clientsStore.getClient(clientId);
+
+    if (!client) {
+      if (!redirectUri) {
+        res.status(400).json({ error: "invalid_client", error_description: "Invalid client_id" });
+        return;
+      }
+      client = await oauth.clientsStore.ensurePublicClient(clientId, redirectUri);
+    } else if (redirectUri && !client.redirect_uris.includes(redirectUri)) {
+      client = await oauth.clientsStore.ensurePublicClient(clientId, redirectUri);
+    }
+
+    if (redirectUri) {
+      if (!client.redirect_uris.includes(redirectUri)) {
+        res.status(400).json({ error: "invalid_request", error_description: "Unregistered redirect_uri" });
+        return;
+      }
+    } else if (client.redirect_uris.length === 1) {
+      redirectUri = client.redirect_uris[0];
+    } else {
+      res.status(400).json({ error: "invalid_request", error_description: "redirect_uri must be specified when client has multiple registered URIs" });
+      return;
+    }
+
+    const responseType = String(source.response_type ?? "");
+    const codeChallenge = String(source.code_challenge ?? "");
+    const codeChallengeMethod = String(source.code_challenge_method ?? "");
+    const state = typeof source.state === "string" ? source.state : undefined;
+    const scope = typeof source.scope === "string" ? source.scope : "";
+    const resourceValue = typeof source.resource === "string" ? source.resource : undefined;
+
+    if (responseType !== "code") {
+      res.redirect(302, createAuthorizationErrorRedirect(redirectUri, "invalid_request", "response_type must be code", state));
+      return;
+    }
+    if (!codeChallenge || codeChallengeMethod !== "S256") {
+      res.redirect(302, createAuthorizationErrorRedirect(redirectUri, "invalid_request", "PKCE S256 is required", state));
+      return;
+    }
+
+    let resource: URL | undefined;
+    if (resourceValue) {
+      try {
+        resource = new URL(resourceValue);
+      } catch {
+        res.redirect(302, createAuthorizationErrorRedirect(redirectUri, "invalid_request", "resource must be a valid URL", state));
+        return;
+      }
+    }
+
+    await oauth.authorize(client, {
+      state,
+      scopes: scope.length > 0 ? scope.split(" ").filter(Boolean) : [],
+      redirectUri,
+      codeChallenge,
+      resource,
+    }, res);
+  } catch (error) {
+    const description = error instanceof Error ? error.message : "Internal Server Error";
+    if (redirectUri) {
+      res.redirect(302, createAuthorizationErrorRedirect(redirectUri, "invalid_request", description));
+      return;
+    }
+    res.status(400).json({ error: "invalid_client", error_description: description });
+  }
 });
 
 app.use(mcpAuthRouter({
@@ -273,6 +359,16 @@ function isLoopbackRequest(req: express.Request): boolean {
   const host = String(req.headers["x-forwarded-host"] ?? req.headers.host ?? "").toLowerCase();
   const bareHost = host.startsWith("[") ? host.slice(1, host.indexOf("]")) : host.split(":")[0] ?? "";
   return isLoopbackAddress(remote) && (!forwardedFor || isLoopbackAddress(forwardedFor)) && (!bareHost || bareHost === "localhost" || bareHost === "127.0.0.1" || bareHost === "::1");
+}
+
+function createAuthorizationErrorRedirect(redirectUri: string, error: string, description: string, state?: string): string {
+  const url = new URL(redirectUri);
+  url.searchParams.set("error", error);
+  url.searchParams.set("error_description", description);
+  if (state) {
+    url.searchParams.set("state", state);
+  }
+  return url.toString();
 }
 
 function isLoopbackAddress(value: string): boolean {
