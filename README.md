@@ -9,7 +9,7 @@ Render-hosted MCP server for publishing to pre-bound Bluesky and Discord targets
 - GitHub allowlist managed from the admin UI
 - Bound publishing targets for:
   - Bluesky (identifier + app password)
-  - Discord (webhook URL)
+  - Discord (webhook URL or bot token + channel id)
 
 ## Runtime notes
 

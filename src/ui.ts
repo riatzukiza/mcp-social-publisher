@@ -231,6 +231,8 @@ export function installUi(app: Express, oauth: SimpleOAuthProvider, options: UiO
     await options.configStore.upsertDiscordTarget({
       name: String(req.body?.name || ""),
       webhookUrl: String(req.body?.webhookUrl || ""),
+      botToken: String(req.body?.botToken || ""),
+      channelId: String(req.body?.channelId || ""),
       username: String(req.body?.username || ""),
       avatarUrl: String(req.body?.avatarUrl || ""),
     });
@@ -520,7 +522,9 @@ function renderAdminDashboard(args: {
           <div class="label">Discord target</div>
           <form method="post" action="/admin/discord-targets/upsert">
             <input name="name" type="text" placeholder="announce" />
-            <input name="webhookUrl" type="password" placeholder="https://discord.com/api/webhooks/..." />
+            <input name="webhookUrl" type="password" placeholder="Webhook URL (optional if using bot token)" />
+            <input name="botToken" type="password" placeholder="Bot token (optional if using webhook)" />
+            <input name="channelId" type="text" placeholder="Channel ID for bot-token delivery" />
             <input name="username" type="text" placeholder="Optional username override" />
             <input name="avatarUrl" type="text" placeholder="Optional avatar URL" />
             <button class="button" type="submit">Save Discord target</button>

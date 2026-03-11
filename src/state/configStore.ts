@@ -10,7 +10,10 @@ export type GitHubOAuthConfig = {
 export type DiscordTarget = {
   id: string;
   name: string;
+  delivery: "webhook" | "bot";
   webhookUrl: string;
+  botToken: string;
+  channelId: string;
   username: string;
   avatarUrl: string;
   createdAt: string;
@@ -159,11 +162,20 @@ export class ConfigStore {
   public async upsertDiscordTarget(input: {
     name: string;
     webhookUrl: string;
+    botToken?: string;
+    channelId?: string;
     username?: string;
     avatarUrl?: string;
   }): Promise<void> {
     const id = normalizeTargetKey(input.name);
     if (!id) {
+      return;
+    }
+    const webhookUrl = input.webhookUrl.trim();
+    const botToken = input.botToken?.trim() ?? "";
+    const channelId = input.channelId?.trim() ?? "";
+    const delivery = webhookUrl ? "webhook" : "bot";
+    if (delivery === "bot" && (!botToken || !channelId)) {
       return;
     }
     await this.writeState(() => {
@@ -172,7 +184,10 @@ export class ConfigStore {
       const next: DiscordTarget = {
         id,
         name: input.name.trim(),
-        webhookUrl: input.webhookUrl.trim(),
+        delivery,
+        webhookUrl,
+        botToken,
+        channelId,
         username: input.username?.trim() ?? "",
         avatarUrl: input.avatarUrl?.trim() ?? "",
         createdAt,
@@ -276,6 +291,9 @@ export function maskSecret(value: string): string {
 }
 
 export function describeDiscordTarget(target: DiscordTarget): string {
+  if (target.delivery === "bot") {
+    return `channel ${target.channelId} via bot token`;
+  }
   try {
     const url = new URL(target.webhookUrl);
     return `${url.hostname}${url.pathname.split("/").slice(-2).join("/")}`;
@@ -322,14 +340,26 @@ function normalizeDiscordTarget(raw: unknown): DiscordTarget | null {
   }
   const candidate = raw as Record<string, unknown>;
   const name = String(candidate.name ?? "").trim();
+  const delivery = String(candidate.delivery ?? "").trim() === "bot" ? "bot" : "webhook";
   const webhookUrl = String(candidate.webhookUrl ?? "").trim();
-  if (!name || !webhookUrl) {
+  const botToken = String(candidate.botToken ?? "").trim();
+  const channelId = String(candidate.channelId ?? "").trim();
+  if (!name) {
+    return null;
+  }
+  if (delivery === "webhook" && !webhookUrl) {
+    return null;
+  }
+  if (delivery === "bot" && (!botToken || !channelId)) {
     return null;
   }
   return {
     id: normalizeTargetKey(String(candidate.id ?? name)),
     name,
+    delivery,
     webhookUrl,
+    botToken,
+    channelId,
     username: String(candidate.username ?? "").trim(),
     avatarUrl: String(candidate.avatarUrl ?? "").trim(),
     createdAt: String(candidate.createdAt ?? nowIso()),
