@@ -11,12 +11,16 @@ import { requireBearerAuth } from "@modelcontextprotocol/sdk/server/auth/middlew
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 
 import { FilePersistence } from "./auth/filePersistence.js";
+import { PostgresPersistence } from "./auth/postgresPersistence.js";
 import { SimpleOAuthProvider } from "./auth/simpleOAuthProvider.js";
+import { closeSql, getSql, initSchema } from "./lib/postgres.js";
 import { createMcpHttpRouter } from "./lib/mcpHttp.js";
 import { createMcpServer } from "./lib/mcpServer.js";
 import { publishBlueskyPost, type ImageInput } from "./publishers/bluesky.js";
 import { publishDiscordMessage } from "./publishers/discord.js";
 import { ConfigStore } from "./state/configStore.js";
+import { PostgresConfigStore } from "./state/postgresConfigStore.js";
+import type { IConfigStore } from "./state/interface.js";
 import { installUi } from "./ui.js";
 
 const ENV = z.object({
@@ -28,21 +32,34 @@ const ENV = z.object({
   INITIAL_GITHUB_ALLOWED_USERS: z.string().optional(),
   AUTO_APPROVE: z.string().optional(),
   ALLOW_UNAUTH_LOCAL: z.string().optional(),
+  DATABASE_URL: z.string().optional(),
 }).parse(process.env);
 
 const publicBaseUrl = new URL(ENV.PUBLIC_BASE_URL ?? process.env.RENDER_EXTERNAL_URL ?? `http://127.0.0.1:${ENV.PORT}`);
 const issuerUrl = new URL(ENV.ISSUER_URL ?? publicBaseUrl.toString());
 const resourceServerUrl = new URL("/mcp", publicBaseUrl);
-const dataDir = path.resolve(
-  ENV.DATA_DIR ?? (process.env.RENDER === "true" ? "/tmp/mcp-social-publisher" : path.join(process.cwd(), "data")),
-);
 
-const persistence = new FilePersistence(path.join(dataDir, "oauth-store.json"));
-await persistence.init();
+const usePostgres = Boolean(ENV.DATABASE_URL);
+let persistence: FilePersistence | PostgresPersistence;
+let configStore: IConfigStore;
 
-const configStore = new ConfigStore(path.join(dataDir, "config.json"), {
-  initialGitHubUsers: splitList(ENV.INITIAL_GITHUB_ALLOWED_USERS),
-});
+if (usePostgres) {
+  await initSchema();
+  persistence = new PostgresPersistence();
+  await persistence.init();
+  configStore = new PostgresConfigStore({
+    initialGitHubUsers: splitList(ENV.INITIAL_GITHUB_ALLOWED_USERS),
+  });
+} else {
+  const dataDir = path.resolve(
+    ENV.DATA_DIR ?? (process.env.RENDER === "true" ? "/tmp/mcp-social-publisher" : path.join(process.cwd(), "data")),
+  );
+  persistence = new FilePersistence(path.join(dataDir, "oauth-store.json"));
+  await persistence.init();
+  configStore = new ConfigStore(path.join(dataDir, "config.json"), {
+    initialGitHubUsers: splitList(ENV.INITIAL_GITHUB_ALLOWED_USERS),
+  });
+}
 await configStore.init();
 
 const oauth = new SimpleOAuthProvider(
@@ -69,14 +86,20 @@ const jsonParser = express.json({ limit: "1mb" });
 
 app.set("trust proxy", true);
 app.use(cors({ origin: "*", exposedHeaders: ["mcp-session-id"] }));
-app.get("/health", (_req, res) => {
+app.get("/health", async (_req, res) => {
+  const [hasGitHub, snapshot, targets] = await Promise.all([
+    configStore.hasGitHubOAuthConfig(),
+    configStore.getSnapshot(),
+    configStore.getPublicTargets(),
+  ]);
   res.json({
     ok: true,
     service: "mcp-social-publisher",
     publicBaseUrl: publicBaseUrl.toString(),
-    githubOAuthConfigured: configStore.hasGitHubOAuthConfig(),
-    allowlistCount: configStore.getSnapshot().allowedGitHubUsers.length,
-    targetCount: configStore.getPublicTargets().length,
+    githubOAuthConfigured: hasGitHub,
+    allowlistCount: snapshot.allowedGitHubUsers.length,
+    targetCount: targets.length,
+    storage: usePostgres ? "postgres" : "file",
   });
 });
 
@@ -106,9 +129,10 @@ const server = createMcpServer({
         inputSchema: {},
         annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
       },
-      async (): Promise<CallToolResult> => ({
-        content: [{ type: "text", text: JSON.stringify(configStore.getPublicTargets(), null, 2) }],
-      }),
+      async (): Promise<CallToolResult> => {
+        const targets = await configStore.getPublicTargets();
+        return { content: [{ type: "text", text: JSON.stringify(targets, null, 2) }] };
+      },
     );
 
     serverInstance.registerTool(
@@ -133,7 +157,7 @@ const server = createMcpServer({
         annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
       },
       async ({ target, text, images }): Promise<CallToolResult> => {
-        const binding = configStore.getBlueskyTarget(target);
+        const binding = await configStore.getBlueskyTarget(target);
         if (!binding) {
           throw new Error(`Unknown Bluesky target: ${target}`);
         }
@@ -158,7 +182,7 @@ const server = createMcpServer({
         annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
       },
       async ({ target, content }): Promise<CallToolResult> => {
-        const binding = configStore.getDiscordTarget(target);
+        const binding = await configStore.getDiscordTarget(target);
         if (!binding) {
           throw new Error(`Unknown Discord target: ${target}`);
         }
@@ -207,6 +231,9 @@ const listener = app.listen(ENV.PORT, "0.0.0.0", () => {
 
 const cleanup = async (): Promise<void> => {
   await oauth.stop();
+  if (usePostgres) {
+    await closeSql();
+  }
   listener.close(() => {
     process.exit(0);
   });

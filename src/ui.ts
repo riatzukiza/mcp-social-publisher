@@ -2,9 +2,9 @@ import { createHash, createHmac, timingSafeEqual } from "node:crypto";
 
 import express, { type Express, type Request, type Response } from "express";
 
-import { SimpleOAuthProvider } from "./auth/simpleOAuthProvider.js";
+import type { SimpleOAuthProvider } from "./auth/simpleOAuthProvider.js";
+import type { IConfigStore } from "./state/interface.js";
 import {
-  ConfigStore,
   type BlueskyTarget,
   type DiscordTarget,
   describeDiscordTarget,
@@ -16,7 +16,7 @@ import {
 type UiOptions = {
   publicBaseUrl: URL;
   adminAuthKey: string;
-  configStore: ConfigStore;
+  configStore: IConfigStore;
 };
 
 type AdminSession = {
@@ -39,7 +39,7 @@ export function installUi(app: Express, oauth: SimpleOAuthProvider, options: UiO
     res.redirect(307, `/oauth/callback/github${query ? `?${query}` : ""}`);
   });
 
-  app.get("/login", (req: Request, res: Response) => {
+  app.get("/login", async (req: Request, res: Response) => {
     const rid = String(req.query.rid || "");
     const pending = oauth.getPending(rid);
     if (!pending) {
@@ -50,23 +50,27 @@ export function installUi(app: Express, oauth: SimpleOAuthProvider, options: UiO
       res.redirect(`/consent?rid=${encodeURIComponent(rid)}`);
       return;
     }
+    const [hasGitHub, snapshot] = await Promise.all([
+      options.configStore.hasGitHubOAuthConfig(),
+      options.configStore.getSnapshot(),
+    ]);
     res.status(200).type("html").send(renderPublicLoginPage({
       rid,
       publicBaseUrl: options.publicBaseUrl,
-      githubConfigured: options.configStore.hasGitHubOAuthConfig(),
-      allowlistCount: options.configStore.getSnapshot().allowedGitHubUsers.length,
+      githubConfigured: hasGitHub,
+      allowlistCount: snapshot.allowedGitHubUsers.length,
       error: String(req.query.error || ""),
     }));
   });
 
-  app.get("/login/github", (req: Request, res: Response) => {
+  app.get("/login/github", async (req: Request, res: Response) => {
     const rid = String(req.query.rid || "");
     if (!rid || !oauth.getPending(rid)) {
       res.status(400).send("Missing rid");
       return;
     }
 
-    const config = options.configStore.getSnapshot().githubOAuth;
+    const config = (await options.configStore.getSnapshot()).githubOAuth;
     if (!config.clientId || !config.clientSecret) {
       res.redirect(`/login?rid=${encodeURIComponent(rid)}&error=github-not-configured`);
       return;
@@ -89,7 +93,7 @@ export function installUi(app: Express, oauth: SimpleOAuthProvider, options: UiO
       return;
     }
 
-    const config = options.configStore.getSnapshot().githubOAuth;
+    const config = (await options.configStore.getSnapshot()).githubOAuth;
     if (!config.clientId || !config.clientSecret) {
       res.redirect(`/login?rid=${encodeURIComponent(rid)}&error=github-not-configured`);
       return;
@@ -109,7 +113,7 @@ export function installUi(app: Express, oauth: SimpleOAuthProvider, options: UiO
     }
 
     const normalizedLogin = normalizeLogin(githubUser.login);
-    if (!options.configStore.isAllowedGitHubUser(normalizedLogin)) {
+    if (!(await options.configStore.isAllowedGitHubUser(normalizedLogin))) {
       res.status(403).type("html").send(renderDeniedPage(githubUser.login));
       return;
     }
@@ -160,14 +164,14 @@ export function installUi(app: Express, oauth: SimpleOAuthProvider, options: UiO
     res.redirect(oauth.deny(rid, "access_denied", "User denied request"));
   });
 
-  app.get("/admin", (req: Request, res: Response) => {
+  app.get("/admin", async (req: Request, res: Response) => {
     const session = readAdminSession(req, cookieSecret);
     if (!session) {
       res.status(200).type("html").send(renderAdminUnlockPage(String(req.query.error || "")));
       return;
     }
 
-    const snapshot = options.configStore.getSnapshot();
+    const snapshot = await options.configStore.getSnapshot();
     res.status(200).type("html").send(renderAdminDashboard({
       publicBaseUrl: options.publicBaseUrl,
       githubOAuth: snapshot.githubOAuth,

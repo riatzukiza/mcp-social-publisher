@@ -47,6 +47,35 @@ export type PublicTargetSummary = {
   destination: string;
 };
 
+export interface IConfigStore {
+  init(): Promise<void>;
+  getSnapshot(): Promise<ConfigState>;
+  getPublicTargets(): Promise<PublicTargetSummary[]>;
+  hasGitHubOAuthConfig(): Promise<boolean>;
+  isAllowedGitHubUser(login: string): Promise<boolean>;
+  getDiscordTarget(nameOrId: string): Promise<DiscordTarget | undefined>;
+  getBlueskyTarget(nameOrId: string): Promise<BlueskyTarget | undefined>;
+  setGitHubOAuth(clientId: string, clientSecret: string): Promise<void>;
+  addGitHubUser(login: string): Promise<void>;
+  removeGitHubUser(login: string): Promise<void>;
+  upsertDiscordTarget(input: {
+    name: string;
+    webhookUrl: string;
+    botToken?: string;
+    channelId?: string;
+    username?: string;
+    avatarUrl?: string;
+  }): Promise<void>;
+  removeDiscordTarget(nameOrId: string): Promise<void>;
+  upsertBlueskyTarget(input: {
+    name: string;
+    identifier: string;
+    appPassword: string;
+    serviceUrl: string;
+  }): Promise<void>;
+  removeBlueskyTarget(nameOrId: string): Promise<void>;
+}
+
 type ConfigStoreOptions = {
   initialGitHubUsers: string[];
 };
@@ -71,7 +100,7 @@ function emptyState(initialGitHubUsers: readonly string[]): ConfigState {
   };
 }
 
-export class ConfigStore {
+export class ConfigStore implements IConfigStore {
   private state: ConfigState;
   private queue: Promise<unknown> = Promise.resolve();
 
@@ -93,11 +122,11 @@ export class ConfigStore {
     }
   }
 
-  public getSnapshot(): ConfigState {
+  public async getSnapshot(): Promise<ConfigState> {
     return JSON.parse(JSON.stringify(this.state)) as ConfigState;
   }
 
-  public getPublicTargets(): PublicTargetSummary[] {
+  public async getPublicTargets(): Promise<PublicTargetSummary[]> {
     return [
       ...this.state.targets.discord.map((target) => ({
         id: target.id,
@@ -114,20 +143,20 @@ export class ConfigStore {
     ];
   }
 
-  public hasGitHubOAuthConfig(): boolean {
+  public async hasGitHubOAuthConfig(): Promise<boolean> {
     return this.state.githubOAuth.clientId.length > 0 && this.state.githubOAuth.clientSecret.length > 0;
   }
 
-  public isAllowedGitHubUser(login: string): boolean {
+  public async isAllowedGitHubUser(login: string): Promise<boolean> {
     return this.state.allowedGitHubUsers.includes(normalizeLogin(login));
   }
 
-  public getDiscordTarget(nameOrId: string): DiscordTarget | undefined {
+  public async getDiscordTarget(nameOrId: string): Promise<DiscordTarget | undefined> {
     const needle = normalizeTargetKey(nameOrId);
     return this.state.targets.discord.find((target) => target.id === needle || normalizeTargetKey(target.name) === needle);
   }
 
-  public getBlueskyTarget(nameOrId: string): BlueskyTarget | undefined {
+  public async getBlueskyTarget(nameOrId: string): Promise<BlueskyTarget | undefined> {
     const needle = normalizeTargetKey(nameOrId);
     return this.state.targets.bluesky.find((target) => target.id === needle || normalizeTargetKey(target.name) === needle);
   }
@@ -178,9 +207,9 @@ export class ConfigStore {
     if (delivery === "bot" && (!botToken || !channelId)) {
       return;
     }
+    const existing = this.state.targets.discord.find((target) => target.id === id);
+    const createdAt = existing?.createdAt ?? nowIso();
     await this.writeState(() => {
-      const existing = this.getDiscordTarget(id);
-      const createdAt = existing?.createdAt ?? nowIso();
       const next: DiscordTarget = {
         id,
         name: input.name.trim(),
@@ -217,9 +246,9 @@ export class ConfigStore {
     if (!id) {
       return;
     }
+    const existing = this.state.targets.bluesky.find((target) => target.id === id);
+    const createdAt = existing?.createdAt ?? nowIso();
     await this.writeState(() => {
-      const existing = this.getBlueskyTarget(id);
-      const createdAt = existing?.createdAt ?? nowIso();
       const next: BlueskyTarget = {
         id,
         name: input.name.trim(),
