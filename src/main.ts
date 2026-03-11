@@ -14,7 +14,7 @@ import { FilePersistence } from "./auth/filePersistence.js";
 import { SimpleOAuthProvider } from "./auth/simpleOAuthProvider.js";
 import { createMcpHttpRouter } from "./lib/mcpHttp.js";
 import { createMcpServer } from "./lib/mcpServer.js";
-import { publishBlueskyPost } from "./publishers/bluesky.js";
+import { publishBlueskyPost, type ImageInput } from "./publishers/bluesky.js";
 import { publishDiscordMessage } from "./publishers/discord.js";
 import { ConfigStore } from "./state/configStore.js";
 import { installUi } from "./ui.js";
@@ -118,15 +118,31 @@ const server = createMcpServer({
         inputSchema: {
           target: z.string().min(1).describe("Configured Bluesky target name or id"),
           text: z.string().min(1).max(300).describe("Bluesky post text, up to 300 characters"),
+          images: z
+            .array(
+              z.object({
+                data: z.string().min(1).describe("Base64-encoded image data or URL"),
+                alt: z.string().max(256).optional().describe("Alt text for accessibility"),
+                encoding: z.enum(["base64", "url"]).optional().describe("Encoding: base64 (default) or url"),
+              }),
+            )
+            .max(4)
+            .optional()
+            .describe("Optional images (up to 4), base64 or URL"),
         },
         annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
       },
-      async ({ target, text }): Promise<CallToolResult> => {
+      async ({ target, text, images }): Promise<CallToolResult> => {
         const binding = configStore.getBlueskyTarget(target);
         if (!binding) {
           throw new Error(`Unknown Bluesky target: ${target}`);
         }
-        const result = await publishBlueskyPost(binding, text);
+        const parsedImages: ImageInput[] | undefined = images?.map((img) => ({
+          data: img.data,
+          alt: img.alt,
+          encoding: img.encoding,
+        }));
+        const result = await publishBlueskyPost(binding, text, parsedImages);
         return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
       },
     );
