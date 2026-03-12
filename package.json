@@ -4,7 +4,7 @@
   "type": "module",
   "scripts": {
     "postinstall": "node scripts/setup-python-sandbox.mjs",
-    "build": "tsc",
+    "build": "node scripts/setup-python-sandbox.mjs && tsc",
     "dev": "tsx src/main.ts",
     "start": "node dist/main.js",
     "typecheck": "tsc --noEmit"
