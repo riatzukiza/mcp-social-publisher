@@ -1,6 +1,6 @@
 import { getSql } from "../lib/postgres.js";
-import type { BlueskyTarget, ConfigState, DiscordTarget, GitHubOAuthConfig, PublicTargetSummary } from "./configStore.js";
-import { describeDiscordTarget, normalizeLogin, normalizeServiceUrl, normalizeTargetKey } from "./configStore.js";
+import type { BlueskyTarget, ConfigState, DiscordTarget, DiscordTargetInput, GitHubOAuthConfig, PublicTargetSummary } from "./configStore.js";
+import { describeDiscordTarget, normalizeDiscordTarget, normalizeLogin, normalizeServiceUrl, normalizeTargetKey } from "./configStore.js";
 
 type ConfigRow = {
   key: string;
@@ -78,7 +78,9 @@ export class PostgresConfigStore {
         ...(parsed.allowedGitHubUsers ?? []),
       ].filter(Boolean))].sort(),
       targets: {
-        discord: parsed.targets?.discord ?? [],
+        discord: Array.isArray(parsed.targets?.discord)
+          ? parsed.targets.discord.map((target) => normalizeDiscordTarget(target)).filter((target): target is DiscordTarget => target !== null)
+          : [],
         bluesky: parsed.targets?.bluesky ?? [],
       },
     };
@@ -162,21 +164,17 @@ export class PostgresConfigStore {
     await this.save(data);
   }
 
-  async upsertDiscordTarget(input: {
-    name: string;
-    webhookUrl: string;
-    botToken?: string;
-    channelId?: string;
-    username?: string;
-    avatarUrl?: string;
-  }): Promise<void> {
+  async upsertDiscordTarget(input: DiscordTargetInput): Promise<void> {
     const id = normalizeTargetKey(input.name);
     if (!id) return;
     const webhookUrl = input.webhookUrl.trim();
     const botToken = input.botToken?.trim() ?? "";
+    const userToken = input.userToken?.trim() ?? "";
     const channelId = input.channelId?.trim() ?? "";
-    const delivery = webhookUrl ? "webhook" : "bot";
+    const delivery = input.delivery ?? (webhookUrl ? "webhook" : userToken ? "userbot" : "bot");
+    if (delivery === "webhook" && !webhookUrl) return;
     if (delivery === "bot" && (!botToken || !channelId)) return;
+    if (delivery === "userbot" && (!userToken || !channelId)) return;
 
     const data = await this.load();
     const existing = data.targets?.discord?.find((t) => t.id === id);
@@ -187,9 +185,12 @@ export class PostgresConfigStore {
       delivery,
       webhookUrl,
       botToken,
+      userToken,
       channelId,
       username: input.username?.trim() ?? "",
       avatarUrl: input.avatarUrl?.trim() ?? "",
+      proxyUrl: input.proxyUrl?.trim() ?? "",
+      headless: input.headless ?? delivery === "userbot",
       createdAt,
       updatedAt: nowIso(),
     };

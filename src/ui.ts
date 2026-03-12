@@ -234,11 +234,15 @@ export function installUi(app: Express, oauth: SimpleOAuthProvider, options: UiO
     }
     await options.configStore.upsertDiscordTarget({
       name: String(req.body?.name || ""),
+      delivery: parseDiscordDelivery(String(req.body?.delivery || "")),
       webhookUrl: String(req.body?.webhookUrl || ""),
       botToken: String(req.body?.botToken || ""),
+      userToken: String(req.body?.userToken || ""),
       channelId: String(req.body?.channelId || ""),
       username: String(req.body?.username || ""),
       avatarUrl: String(req.body?.avatarUrl || ""),
+      proxyUrl: String(req.body?.proxyUrl || ""),
+      headless: String(req.body?.headless || "").trim().toLowerCase() === "on",
     });
     res.redirect(303, "/admin?message=discord-target-updated");
   });
@@ -526,11 +530,20 @@ function renderAdminDashboard(args: {
           <div class="label">Discord target</div>
           <form method="post" action="/admin/discord-targets/upsert">
             <input name="name" type="text" placeholder="announce" />
-            <input name="webhookUrl" type="password" placeholder="Webhook URL (optional if using bot token)" />
-            <input name="botToken" type="password" placeholder="Bot token (optional if using webhook)" />
-            <input name="channelId" type="text" placeholder="Channel ID for bot-token delivery" />
+            <select name="delivery">
+              <option value="webhook">Webhook</option>
+              <option value="bot">Bot token</option>
+              <option value="userbot">discord-user-bots user token</option>
+            </select>
+            <input name="webhookUrl" type="password" placeholder="Webhook URL (for webhook strategy)" />
+            <input name="botToken" type="password" placeholder="Bot token (for bot strategy)" />
+            <input name="userToken" type="password" placeholder="User token (for discord-user-bots strategy)" />
+            <input name="channelId" type="text" placeholder="Channel ID (for bot or user-bot strategy)" />
             <input name="username" type="text" placeholder="Optional username override" />
             <input name="avatarUrl" type="text" placeholder="Optional avatar URL" />
+            <input name="proxyUrl" type="text" placeholder="Optional proxy URL for discord-user-bots" />
+            <label class="checkbox-row"><input name="headless" type="checkbox" checked /> Headless user-bot mode</label>
+            <div class="note note-warn">discord-user-bots uses a real user token and may put the account at risk. Use only if you understand the operational and policy consequences.</div>
             <button class="button" type="submit">Save Discord target</button>
           </form>
           <ul class="item-list">${discordList}</ul>
@@ -575,6 +588,10 @@ function parseStatusMessage(error: string): string {
     default:
       return error;
   }
+}
+
+function parseDiscordDelivery(value: string): "webhook" | "bot" | "userbot" {
+  return value === "bot" || value === "userbot" ? value : "webhook";
 }
 
 function pageTemplate(args: { title: string; eyebrow: string; headline: string; body: string }): string {

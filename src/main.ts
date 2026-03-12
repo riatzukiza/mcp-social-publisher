@@ -423,7 +423,7 @@ const server = createMcpServer({
     serverInstance.registerTool(
       "publisher_publish_discord",
       {
-        description: "Publish a message to a configured Discord target",
+        description: "Publish a message to a configured Discord target using its configured strategy (webhook, bot token, or discord-user-bots user token).",
         inputSchema: {
           target: z.string().min(1).describe("Configured Discord target name or id"),
           content: z.string().min(1).max(2000).describe("Discord message content, up to 2000 characters"),

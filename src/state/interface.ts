@@ -1,4 +1,4 @@
-import type { BlueskyTarget, DiscordTarget, GitHubOAuthConfig, PublicTargetSummary, ConfigState } from "./configStore.js";
+import type { BlueskyTarget, DiscordTarget, GitHubOAuthConfig, PublicTargetSummary, ConfigState, DiscordTargetInput } from "./configStore.js";
 
 export interface IConfigStore {
   init(): Promise<void>;
@@ -11,14 +11,7 @@ export interface IConfigStore {
   setGitHubOAuth(clientId: string, clientSecret: string): Promise<void>;
   addGitHubUser(login: string): Promise<void>;
   removeGitHubUser(login: string): Promise<void>;
-  upsertDiscordTarget(input: {
-    name: string;
-    webhookUrl: string;
-    botToken?: string;
-    channelId?: string;
-    username?: string;
-    avatarUrl?: string;
-  }): Promise<void>;
+  upsertDiscordTarget(input: DiscordTargetInput): Promise<void>;
   removeDiscordTarget(nameOrId: string): Promise<void>;
   upsertBlueskyTarget(input: {
     name: string;

@@ -7,17 +7,35 @@ export type GitHubOAuthConfig = {
   updatedAt: string;
 };
 
+export type DiscordDelivery = "webhook" | "bot" | "userbot";
+
 export type DiscordTarget = {
   id: string;
   name: string;
-  delivery: "webhook" | "bot";
+  delivery: DiscordDelivery;
   webhookUrl: string;
   botToken: string;
+  userToken: string;
   channelId: string;
   username: string;
   avatarUrl: string;
+  proxyUrl: string;
+  headless: boolean;
   createdAt: string;
   updatedAt: string;
+};
+
+export type DiscordTargetInput = {
+  name: string;
+  delivery?: DiscordDelivery;
+  webhookUrl: string;
+  botToken?: string;
+  userToken?: string;
+  channelId?: string;
+  username?: string;
+  avatarUrl?: string;
+  proxyUrl?: string;
+  headless?: boolean;
 };
 
 export type BlueskyTarget = {
@@ -58,14 +76,7 @@ export interface IConfigStore {
   setGitHubOAuth(clientId: string, clientSecret: string): Promise<void>;
   addGitHubUser(login: string): Promise<void>;
   removeGitHubUser(login: string): Promise<void>;
-  upsertDiscordTarget(input: {
-    name: string;
-    webhookUrl: string;
-    botToken?: string;
-    channelId?: string;
-    username?: string;
-    avatarUrl?: string;
-  }): Promise<void>;
+  upsertDiscordTarget(input: DiscordTargetInput): Promise<void>;
   removeDiscordTarget(nameOrId: string): Promise<void>;
   upsertBlueskyTarget(input: {
     name: string;
@@ -188,23 +199,23 @@ export class ConfigStore implements IConfigStore {
     });
   }
 
-  public async upsertDiscordTarget(input: {
-    name: string;
-    webhookUrl: string;
-    botToken?: string;
-    channelId?: string;
-    username?: string;
-    avatarUrl?: string;
-  }): Promise<void> {
+  public async upsertDiscordTarget(input: DiscordTargetInput): Promise<void> {
     const id = normalizeTargetKey(input.name);
     if (!id) {
       return;
     }
     const webhookUrl = input.webhookUrl.trim();
     const botToken = input.botToken?.trim() ?? "";
+    const userToken = input.userToken?.trim() ?? "";
     const channelId = input.channelId?.trim() ?? "";
-    const delivery = webhookUrl ? "webhook" : "bot";
+    const delivery = normalizeDiscordDelivery(input.delivery ?? inferDiscordDelivery(webhookUrl, botToken, userToken));
     if (delivery === "bot" && (!botToken || !channelId)) {
+      return;
+    }
+    if (delivery === "userbot" && (!userToken || !channelId)) {
+      return;
+    }
+    if (delivery === "webhook" && !webhookUrl) {
       return;
     }
     const existing = this.state.targets.discord.find((target) => target.id === id);
@@ -216,9 +227,12 @@ export class ConfigStore implements IConfigStore {
         delivery,
         webhookUrl,
         botToken,
+        userToken,
         channelId,
         username: input.username?.trim() ?? "",
         avatarUrl: input.avatarUrl?.trim() ?? "",
+        proxyUrl: input.proxyUrl?.trim() ?? "",
+        headless: input.headless ?? delivery === "userbot",
         createdAt,
         updatedAt: nowIso(),
       };
@@ -323,6 +337,9 @@ export function describeDiscordTarget(target: DiscordTarget): string {
   if (target.delivery === "bot") {
     return `channel ${target.channelId} via bot token`;
   }
+  if (target.delivery === "userbot") {
+    return `channel ${target.channelId} via user-bot${target.headless ? " (headless)" : ""}`;
+  }
   try {
     const url = new URL(target.webhookUrl);
     return `${url.hostname}${url.pathname.split("/").slice(-2).join("/")}`;
@@ -363,16 +380,17 @@ function normalizeState(raw: unknown, initialGitHubUsers: readonly string[]): Co
   };
 }
 
-function normalizeDiscordTarget(raw: unknown): DiscordTarget | null {
+export function normalizeDiscordTarget(raw: unknown): DiscordTarget | null {
   if (!raw || typeof raw !== "object") {
     return null;
   }
   const candidate = raw as Record<string, unknown>;
   const name = String(candidate.name ?? "").trim();
-  const delivery = String(candidate.delivery ?? "").trim() === "bot" ? "bot" : "webhook";
   const webhookUrl = String(candidate.webhookUrl ?? "").trim();
   const botToken = String(candidate.botToken ?? "").trim();
+  const userToken = String(candidate.userToken ?? "").trim();
   const channelId = String(candidate.channelId ?? "").trim();
+  const delivery = normalizeDiscordDelivery(String(candidate.delivery ?? inferDiscordDelivery(webhookUrl, botToken, userToken)).trim());
   if (!name) {
     return null;
   }
@@ -382,18 +400,54 @@ function normalizeDiscordTarget(raw: unknown): DiscordTarget | null {
   if (delivery === "bot" && (!botToken || !channelId)) {
     return null;
   }
+  if (delivery === "userbot" && (!userToken || !channelId)) {
+    return null;
+  }
   return {
     id: normalizeTargetKey(String(candidate.id ?? name)),
     name,
     delivery,
     webhookUrl,
     botToken,
+    userToken,
     channelId,
     username: String(candidate.username ?? "").trim(),
     avatarUrl: String(candidate.avatarUrl ?? "").trim(),
+    proxyUrl: String(candidate.proxyUrl ?? "").trim(),
+    headless: normalizeBool(candidate.headless, delivery === "userbot"),
     createdAt: String(candidate.createdAt ?? nowIso()),
     updatedAt: String(candidate.updatedAt ?? nowIso()),
   };
+}
+
+function inferDiscordDelivery(webhookUrl: string, botToken: string, userToken: string): DiscordDelivery {
+  if (webhookUrl) {
+    return "webhook";
+  }
+  if (userToken) {
+    return "userbot";
+  }
+  return "bot";
+}
+
+function normalizeDiscordDelivery(value: string): DiscordDelivery {
+  return value === "bot" || value === "userbot" ? value : "webhook";
+}
+
+function normalizeBool(value: unknown, fallback: boolean): boolean {
+  if (typeof value === "boolean") {
+    return value;
+  }
+  if (typeof value === "string") {
+    const normalized = value.trim().toLowerCase();
+    if (["1", "true", "yes", "on"].includes(normalized)) {
+      return true;
+    }
+    if (["0", "false", "no", "off"].includes(normalized)) {
+      return false;
+    }
+  }
+  return fallback;
 }
 
 function normalizeBlueskyTarget(raw: unknown): BlueskyTarget | null {
