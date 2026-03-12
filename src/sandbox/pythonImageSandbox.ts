@@ -35,6 +35,7 @@ export class PythonImageSandbox {
   private readonly runDir: string;
   private readonly runnerPath: string;
   private readonly projectRoot: string;
+  private readonly setupScriptPath: string;
   private status: SandboxStatus = {
     available: false,
     command: "python3",
@@ -50,6 +51,7 @@ export class PythonImageSandbox {
     this.imageDir = path.join(this.baseDir, "sandbox-images");
     this.runDir = path.join(this.baseDir, "sandbox-runs");
     this.runnerPath = path.join(this.projectRoot, "python", "image_sandbox_runner.py");
+    this.setupScriptPath = path.join(this.projectRoot, "scripts", "setup-python-sandbox.mjs");
   }
 
   public async init(): Promise<void> {
@@ -57,6 +59,17 @@ export class PythonImageSandbox {
     await mkdir(this.runDir, { recursive: true });
     await this.cleanup();
     this.status = await this.detect();
+    if (!this.status.available) {
+      const bootstrapError = await this.bootstrap();
+      if (bootstrapError) {
+        this.status = {
+          ...this.status,
+          details: `bootstrap failed: ${bootstrapError}`,
+        };
+        return;
+      }
+      this.status = await this.detect();
+    }
   }
 
   public getStatus(): SandboxStatus {
@@ -199,6 +212,16 @@ export class PythonImageSandbox {
       command: this.pythonCandidates()[0] ?? "python3",
       details: "python3 with matplotlib and numpy is missing",
     };
+  }
+
+  private async bootstrap(): Promise<string | undefined> {
+    const result = await runProcess(process.execPath, [this.setupScriptPath], this.projectRoot, 10 * 60 * 1000, {
+      SKIP_PYTHON_SANDBOX_SETUP: "0",
+    });
+    if (result.code === 0) {
+      return undefined;
+    }
+    return (result.stderr.trim() || result.stdout.trim() || "unknown bootstrap failure").slice(-MAX_STDERR);
   }
 
   private pythonCandidates(): string[] {
