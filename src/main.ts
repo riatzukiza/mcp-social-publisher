@@ -19,7 +19,7 @@ import { createMcpHttpRouter } from "./lib/mcpHttp.js";
 import { createMcpServer } from "./lib/mcpServer.js";
 import { publishBlueskyPost, type ImageInput } from "./publishers/bluesky.js";
 import { publishDiscordMessage } from "./publishers/discord.js";
-import { PythonImageSandbox } from "./sandbox/pythonImageSandbox.js";
+import { PythonImageSandbox, type RenderedSandboxImage } from "./sandbox/pythonImageSandbox.js";
 import { ConfigStore } from "./state/configStore.js";
 import { PostgresConfigStore } from "./state/postgresConfigStore.js";
 import type { IConfigStore } from "./state/interface.js";
@@ -307,6 +307,7 @@ const server = createMcpServer({
                 "Rendered image sandbox output.",
                 "",
                 "Use the returned publicUrl values in publisher_publish_bluesky images[].data with encoding set to \"url\".",
+                "Or call publisher_render_and_publish_bluesky to render and publish in one step.",
                 "",
                 JSON.stringify({
                   images: rendered,
@@ -328,13 +329,56 @@ const server = createMcpServer({
               mimeType: "text/markdown",
               description: "Exact sandbox and publish workflow for Bluesky images.",
             },
-            ...rendered.map((image) => ({
-              type: "resource_link" as const,
-              uri: image.resourceUri,
-              name: image.fileName,
-              mimeType: image.mimeType,
-              description: `Generated image. Public URL: ${image.publicUrl}`,
-            })),
+            ...toSandboxResourceLinks(rendered),
+          ],
+        };
+      },
+    );
+
+    serverInstance.registerTool(
+      "publisher_render_and_publish_bluesky",
+      {
+        description: "Render matplotlib/numpy Python code on the server and publish the resulting images to a configured Bluesky target in one call.",
+        inputSchema: {
+          target: z.string().min(1).describe("Configured Bluesky target name or id"),
+          text: z.string().min(1).max(300).describe("Bluesky post text, up to 300 characters"),
+          code: z.string().min(1).max(24000).describe("Python plotting code that uses preloaded plt, np, patches, PolarAxes, and optional save_image(name=None, fig=None). Imports are disabled."),
+          imageAlts: z.array(z.string().max(256)).max(4).optional().describe("Optional alt text strings in generated image order."),
+          defaultAlt: z.string().max(256).optional().describe("Fallback alt text for any generated image without a matching imageAlts entry."),
+        },
+        annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
+      },
+      async ({ target, text, code, imageAlts, defaultAlt }): Promise<CallToolResult> => {
+        const binding = await configStore.getBlueskyTarget(target);
+        if (!binding) {
+          throw new Error(`Unknown Bluesky target: ${target}`);
+        }
+
+        const rendered = await imageSandbox.render(code);
+        if (rendered.length > 4) {
+          throw new Error(`Sandbox generated ${rendered.length} images, but Bluesky supports at most 4 images per post`);
+        }
+
+        const images = toSandboxImageInputs(rendered, imageAlts, defaultAlt);
+        const publish = await publishBlueskyPost(binding, text, images);
+
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify({
+                renderedImages: rendered,
+                publish,
+              }, null, 2),
+            },
+            {
+              type: "resource_link",
+              uri: imageSandbox.getGuideUri(),
+              name: "Bluesky Image Workflow Guide",
+              mimeType: "text/markdown",
+              description: "Exact sandbox and publish workflow for Bluesky images.",
+            },
+            ...toSandboxResourceLinks(rendered),
           ],
         };
       },
@@ -343,7 +387,7 @@ const server = createMcpServer({
     serverInstance.registerTool(
       "publisher_publish_bluesky",
       {
-        description: "Publish a post to a configured Bluesky target. For generated charts, first call publisher_render_python_image and pass its publicUrl values as images[].data with encoding='url'.",
+        description: "Publish a post to a configured Bluesky target. For generated charts, either call publisher_render_python_image first or use publisher_render_and_publish_bluesky for a single-step flow.",
         inputSchema: {
           target: z.string().min(1).describe("Configured Bluesky target name or id"),
           text: z.string().min(1).max(300).describe("Bluesky post text, up to 300 characters"),
@@ -488,6 +532,30 @@ function createAuthorizationErrorRedirect(redirectUri: string, error: string, de
     url.searchParams.set("state", state);
   }
   return url.toString();
+}
+
+function toSandboxImageInputs(rendered: RenderedSandboxImage[], imageAlts?: string[], defaultAlt?: string): ImageInput[] {
+  return rendered.map((image, index) => ({
+    data: image.publicUrl,
+    encoding: "url",
+    alt: imageAlts?.[index] ?? defaultAlt ?? `Generated image ${index + 1}`,
+  }));
+}
+
+function toSandboxResourceLinks(rendered: RenderedSandboxImage[]): Array<{
+  type: "resource_link";
+  uri: string;
+  name: string;
+  mimeType: string;
+  description: string;
+}> {
+  return rendered.map((image) => ({
+    type: "resource_link",
+    uri: image.resourceUri,
+    name: image.fileName,
+    mimeType: image.mimeType,
+    description: `Generated image. Public URL: ${image.publicUrl}`,
+  }));
 }
 
 function isLoopbackAddress(value: string): boolean {

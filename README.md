@@ -22,6 +22,7 @@ Render-hosted MCP server for publishing to pre-bound Bluesky and Discord targets
 
 - `publisher_list_targets`
 - `publisher_render_python_image`
+- `publisher_render_and_publish_bluesky`
 - `publisher_publish_bluesky`
 - `publisher_publish_discord`
 
@@ -29,6 +30,7 @@ Render-hosted MCP server for publishing to pre-bound Bluesky and Discord targets
 
 - `publisher_render_python_image` runs a small server-side matplotlib sandbox with preloaded `plt`, `np`, `patches`, and `PolarAxes`.
 - Use the returned `publicUrl` values as `images[].data` with `encoding: "url"` when calling `publisher_publish_bluesky`.
+- `publisher_render_and_publish_bluesky` handles that full flow in one call when the client just wants to generate a chart and post it.
 
 ## Local run
 
