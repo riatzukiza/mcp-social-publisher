@@ -3,6 +3,7 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
+    "postinstall": "node scripts/setup-python-sandbox.mjs",
     "build": "tsc",
     "dev": "tsx src/main.ts",
     "start": "node dist/main.js",
