@@ -1,10 +1,10 @@
 # MCP Social Publisher
 
-Render-hosted MCP server for publishing to pre-bound Bluesky and Discord targets.
+MCP server for publishing to pre-bound Bluesky and Discord targets.
 
 ## What it provides
 
-- MCP OAuth 2.1 endpoints protected by GitHub login
+- MCP access via OAuth 2.1 or a static bearer-style key
 - Admin UI gated by a pre-shared key at `/admin`
 - GitHub allowlist managed from the admin UI
 - Bound publishing targets for:
@@ -13,8 +13,10 @@ Render-hosted MCP server for publishing to pre-bound Bluesky and Discord targets
 
 ## Runtime notes
 
-- `PUBLIC_BASE_URL` defaults to `RENDER_EXTERNAL_URL` on Render.
+- `HOST` controls the bind address (default `0.0.0.0`).
+- `PUBLIC_BASE_URL` defaults to `RENDER_EXTERNAL_URL` on Render, otherwise `http://127.0.0.1:<PORT>`.
 - `ADMIN_AUTH_KEY` is required.
+- `MCP_AUTH_MODE=key` disables OAuth metadata/routes for `/mcp` and instead expects `Authorization: Bearer <MCP_AUTH_KEY>` or `x-api-key: <MCP_AUTH_KEY>`.
 - `INITIAL_GITHUB_ALLOWED_USERS` can seed the allowlist on first boot.
 - Runtime state is stored under `DATA_DIR`.
 
@@ -37,4 +39,23 @@ Render-hosted MCP server for publishing to pre-bound Bluesky and Discord targets
 ```bash
 pnpm install
 ADMIN_AUTH_KEY=change-me pnpm --filter @workspace/mcp-social-publisher dev
+```
+
+## SSH/private deployment example
+
+For a private host deployment without OAuth:
+
+```bash
+HOST=127.0.0.1
+PORT=10000
+PUBLIC_BASE_URL=http://127.0.0.1:10000
+MCP_AUTH_MODE=key
+MCP_AUTH_KEY=change-me-mcp-key
+ADMIN_AUTH_KEY=change-me-admin-key
+```
+
+Then tunnel access through SSH:
+
+```bash
+ssh -L 10000:127.0.0.1:10000 error@ussy.promethean.rest
 ```

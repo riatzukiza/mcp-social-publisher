@@ -1,4 +1,5 @@
 import "dotenv/config";
+import { timingSafeEqual } from "node:crypto";
 import path from "node:path";
 import { readFile } from "node:fs/promises";
 import { pathToFileURL } from "node:url";
@@ -26,16 +27,24 @@ import type { IConfigStore } from "./state/interface.js";
 import { installUi } from "./ui.js";
 
 const ENV = z.object({
+  HOST: z.string().default("0.0.0.0"),
   PORT: z.coerce.number().int().min(1).max(65535).default(10000),
   PUBLIC_BASE_URL: z.string().url().optional(),
   ISSUER_URL: z.string().url().optional(),
   DATA_DIR: z.string().optional(),
+  MCP_AUTH_MODE: z.enum(["oauth", "key"]).default("oauth"),
+  MCP_AUTH_KEY: z.string().min(12).optional(),
   ADMIN_AUTH_KEY: z.string().min(12),
   INITIAL_GITHUB_ALLOWED_USERS: z.string().optional(),
   AUTO_APPROVE: z.string().optional(),
   ALLOW_UNAUTH_LOCAL: z.string().optional(),
   DATABASE_URL: z.string().optional(),
 }).parse(process.env);
+
+const useStaticKeyAuth = ENV.MCP_AUTH_MODE === "key";
+if (useStaticKeyAuth && !ENV.MCP_AUTH_KEY) {
+  throw new Error("MCP_AUTH_KEY is required when MCP_AUTH_MODE=key");
+}
 
 const publicBaseUrl = new URL(ENV.PUBLIC_BASE_URL ?? process.env.RENDER_EXTERNAL_URL ?? `http://127.0.0.1:${ENV.PORT}`);
 const issuerUrl = new URL(ENV.ISSUER_URL ?? publicBaseUrl.toString());
@@ -101,7 +110,9 @@ app.get("/health", async (_req, res) => {
   res.json({
     ok: true,
     service: "mcp-social-publisher",
+    host: ENV.HOST,
     publicBaseUrl: publicBaseUrl.toString(),
+    authMode: useStaticKeyAuth ? "key" : "oauth",
     githubOAuthConfigured: hasGitHub,
     allowlistCount: snapshot.allowedGitHubUsers.length,
     targetCount: targets.length,
@@ -120,99 +131,101 @@ app.get("/sandbox-images/:fileName", async (req, res) => {
   res.type(image.mimeType).send(image.buffer);
 });
 
-app.all("/authorize", authFormParser, async (req, res) => {
-  if (req.method !== "GET" && req.method !== "POST") {
-    res.status(405).json({ error: "invalid_request", error_description: "Method not allowed" });
-    return;
-  }
+if (!useStaticKeyAuth) {
+  app.all("/authorize", authFormParser, async (req, res) => {
+    if (req.method !== "GET" && req.method !== "POST") {
+      res.status(405).json({ error: "invalid_request", error_description: "Method not allowed" });
+      return;
+    }
 
-  res.setHeader("Cache-Control", "no-store");
+    res.setHeader("Cache-Control", "no-store");
 
-  const source = req.method === "POST" ? req.body : req.query;
-  const clientId = String(source.client_id ?? "").trim();
-  let redirectUri = typeof source.redirect_uri === "string" ? source.redirect_uri : undefined;
+    const source = req.method === "POST" ? req.body : req.query;
+    const clientId = String(source.client_id ?? "").trim();
+    let redirectUri = typeof source.redirect_uri === "string" ? source.redirect_uri : undefined;
 
-  if (!clientId) {
-    res.status(400).json({ error: "invalid_request", error_description: "client_id is required" });
-    return;
-  }
+    if (!clientId) {
+      res.status(400).json({ error: "invalid_request", error_description: "client_id is required" });
+      return;
+    }
 
-  try {
-    let client = await oauth.clientsStore.getClient(clientId);
+    try {
+      let client = await oauth.clientsStore.getClient(clientId);
 
-    if (!client) {
-      if (!redirectUri) {
-        res.status(400).json({ error: "invalid_client", error_description: "Invalid client_id" });
+      if (!client) {
+        if (!redirectUri) {
+          res.status(400).json({ error: "invalid_client", error_description: "Invalid client_id" });
+          return;
+        }
+        client = await oauth.clientsStore.ensurePublicClient(clientId, redirectUri);
+      } else if (redirectUri && !client.redirect_uris.includes(redirectUri)) {
+        client = await oauth.clientsStore.ensurePublicClient(clientId, redirectUri);
+      }
+
+      if (redirectUri) {
+        if (!client.redirect_uris.includes(redirectUri)) {
+          res.status(400).json({ error: "invalid_request", error_description: "Unregistered redirect_uri" });
+          return;
+        }
+      } else if (client.redirect_uris.length === 1) {
+        redirectUri = client.redirect_uris[0];
+      } else {
+        res.status(400).json({ error: "invalid_request", error_description: "redirect_uri must be specified when client has multiple registered URIs" });
         return;
       }
-      client = await oauth.clientsStore.ensurePublicClient(clientId, redirectUri);
-    } else if (redirectUri && !client.redirect_uris.includes(redirectUri)) {
-      client = await oauth.clientsStore.ensurePublicClient(clientId, redirectUri);
-    }
 
-    if (redirectUri) {
-      if (!client.redirect_uris.includes(redirectUri)) {
-        res.status(400).json({ error: "invalid_request", error_description: "Unregistered redirect_uri" });
+      const responseType = String(source.response_type ?? "");
+      const codeChallenge = String(source.code_challenge ?? "");
+      const codeChallengeMethod = String(source.code_challenge_method ?? "");
+      const state = typeof source.state === "string" ? source.state : undefined;
+      const scope = typeof source.scope === "string" ? source.scope : "";
+      const resourceValue = typeof source.resource === "string" ? source.resource : undefined;
+
+      if (responseType !== "code") {
+        res.redirect(302, createAuthorizationErrorRedirect(redirectUri, "invalid_request", "response_type must be code", state));
         return;
       }
-    } else if (client.redirect_uris.length === 1) {
-      redirectUri = client.redirect_uris[0];
-    } else {
-      res.status(400).json({ error: "invalid_request", error_description: "redirect_uri must be specified when client has multiple registered URIs" });
-      return;
-    }
-
-    const responseType = String(source.response_type ?? "");
-    const codeChallenge = String(source.code_challenge ?? "");
-    const codeChallengeMethod = String(source.code_challenge_method ?? "");
-    const state = typeof source.state === "string" ? source.state : undefined;
-    const scope = typeof source.scope === "string" ? source.scope : "";
-    const resourceValue = typeof source.resource === "string" ? source.resource : undefined;
-
-    if (responseType !== "code") {
-      res.redirect(302, createAuthorizationErrorRedirect(redirectUri, "invalid_request", "response_type must be code", state));
-      return;
-    }
-    if (!codeChallenge || codeChallengeMethod !== "S256") {
-      res.redirect(302, createAuthorizationErrorRedirect(redirectUri, "invalid_request", "PKCE S256 is required", state));
-      return;
-    }
-
-    let resource: URL | undefined;
-    if (resourceValue) {
-      try {
-        resource = new URL(resourceValue);
-      } catch {
-        res.redirect(302, createAuthorizationErrorRedirect(redirectUri, "invalid_request", "resource must be a valid URL", state));
+      if (!codeChallenge || codeChallengeMethod !== "S256") {
+        res.redirect(302, createAuthorizationErrorRedirect(redirectUri, "invalid_request", "PKCE S256 is required", state));
         return;
       }
-    }
 
-    await oauth.authorize(client, {
-      state,
-      scopes: scope.length > 0 ? scope.split(" ").filter(Boolean) : [],
-      redirectUri,
-      codeChallenge,
-      resource,
-    }, res);
-  } catch (error) {
-    const description = error instanceof Error ? error.message : "Internal Server Error";
-    if (redirectUri) {
-      res.redirect(302, createAuthorizationErrorRedirect(redirectUri, "invalid_request", description));
-      return;
-    }
-    res.status(400).json({ error: "invalid_client", error_description: description });
-  }
-});
+      let resource: URL | undefined;
+      if (resourceValue) {
+        try {
+          resource = new URL(resourceValue);
+        } catch {
+          res.redirect(302, createAuthorizationErrorRedirect(redirectUri, "invalid_request", "resource must be a valid URL", state));
+          return;
+        }
+      }
 
-app.use(mcpAuthRouter({
-  provider: oauth,
-  issuerUrl,
-  baseUrl: publicBaseUrl,
-  resourceServerUrl,
-  scopesSupported: ["mcp"],
-  resourceName: "mcp-social-publisher",
-}));
+      await oauth.authorize(client, {
+        state,
+        scopes: scope.length > 0 ? scope.split(" ").filter(Boolean) : [],
+        redirectUri,
+        codeChallenge,
+        resource,
+      }, res);
+    } catch (error) {
+      const description = error instanceof Error ? error.message : "Internal Server Error";
+      if (redirectUri) {
+        res.redirect(302, createAuthorizationErrorRedirect(redirectUri, "invalid_request", description));
+        return;
+      }
+      res.status(400).json({ error: "invalid_client", error_description: description });
+    }
+  });
+
+  app.use(mcpAuthRouter({
+    provider: oauth,
+    issuerUrl,
+    baseUrl: publicBaseUrl,
+    resourceServerUrl,
+    scopesSupported: ["mcp"],
+    resourceName: "mcp-social-publisher",
+  }));
+}
 
 installUi(app, oauth, {
   publicBaseUrl,
@@ -453,7 +466,30 @@ const mcpRouter = createMcpHttpRouter({
   createServer: () => server,
 });
 
+const staticKeyAuth: express.RequestHandler = (req, res, next) => {
+  if (toBool(ENV.ALLOW_UNAUTH_LOCAL, false) && isLoopbackRequest(req)) {
+    next();
+    return;
+  }
+
+  const provided = extractStaticAuthKey(req);
+  const expected = ENV.MCP_AUTH_KEY ?? "";
+  if (expected.length > 0 && safeEquals(provided, expected)) {
+    next();
+    return;
+  }
+
+  res.status(401).json({
+    error: "unauthorized",
+    message: "Missing or invalid Authorization: Bearer <MCP_AUTH_KEY>",
+  });
+};
+
 const maybeBearer: express.RequestHandler = (req, res, next) => {
+  if (useStaticKeyAuth) {
+    staticKeyAuth(req, res, next);
+    return;
+  }
   if (toBool(ENV.ALLOW_UNAUTH_LOCAL, false) && isLoopbackRequest(req)) {
     next();
     return;
@@ -473,9 +509,10 @@ app.delete("/mcp", maybeBearer, async (req, res) => {
   await mcpRouter.handleSession(req, res);
 });
 
-const listener = app.listen(ENV.PORT, "0.0.0.0", () => {
-  console.log(`[mcp-social-publisher] listening on ${ENV.PORT}`);
+const listener = app.listen(ENV.PORT, ENV.HOST, () => {
+  console.log(`[mcp-social-publisher] listening on ${ENV.HOST}:${ENV.PORT}`);
   console.log(`[mcp-social-publisher] public base ${publicBaseUrl.toString()}`);
+  console.log(`[mcp-social-publisher] auth mode ${useStaticKeyAuth ? "key" : "oauth"}`);
 });
 
 const cleanup = async (): Promise<void> => {
@@ -506,6 +543,32 @@ function splitList(value: string | undefined): string[] {
     .split(",")
     .map((entry) => entry.trim())
     .filter(Boolean);
+}
+
+function extractStaticAuthKey(req: express.Request): string {
+  const auth = req.headers.authorization;
+  if (typeof auth === "string" && auth.toLowerCase().startsWith("bearer ")) {
+    return auth.slice(7).trim();
+  }
+
+  const apiKey = req.headers["x-api-key"]; // pragma: allowlist secret
+  if (typeof apiKey === "string") { // pragma: allowlist secret
+    return apiKey.trim();
+  }
+  if (Array.isArray(apiKey) && typeof apiKey[0] === "string") { // pragma: allowlist secret
+    return apiKey[0].trim();
+  }
+
+  return "";
+}
+
+function safeEquals(left: string, right: string): boolean {
+  const leftBuffer = Buffer.from(left);
+  const rightBuffer = Buffer.from(right);
+  if (leftBuffer.length === 0 || leftBuffer.length !== rightBuffer.length) {
+    return false;
+  }
+  return timingSafeEqual(leftBuffer, rightBuffer);
 }
 
 function toBool(value: string | undefined, fallback: boolean): boolean {
